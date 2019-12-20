@@ -17,6 +17,7 @@ const IMAGE_SIZE = 224;
 const MIN_IMAGE_SIZE = 36;
 const MIN_IMAGE_BYTES = 1024;
 
+let isInSilentMode = true;
 let isInReviewMode = false;
 let isBlockingQuestionable = true;
 let wingman;
@@ -135,6 +136,10 @@ let iconDataURI = "data:image/pngl;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAA
 
 async function common_create_svg(img, unsafeScore, dataURL)
 {
+    if(isInSilentMode)
+    {
+        return silent_create_svg(img, unsafeScore, dataURL);
+    }
     let visibleScore = Math.floor(unsafeScore*100);
     let svgText = '<?xml version="1.0" standalone="no"?> <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"   "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"> <svg width="'+img.width+'" height="'+img.height+'" version="1.1"      xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">'
     +'<g transform="translate(20 20)">'
