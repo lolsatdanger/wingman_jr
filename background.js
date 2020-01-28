@@ -16,6 +16,7 @@ const MODEL_PATH = 'sqrxr_62_graphopt/model.json'
 const IMAGE_SIZE = 224;
 const MIN_IMAGE_SIZE = 36;
 const MIN_IMAGE_BYTES = 1024;
+const SCAN_STEP_SECONDS = 1.99;
 
 let isInReviewMode = false;
 let wingman;
@@ -637,6 +638,164 @@ browser.webRequest.onHeadersReceived.addListener(
         ],
         types:["main_frame"]
     },
+    ["blocking","responseHeaders"]
+  );
+
+///////////////////////////////Video Stuff////////////////////////////////
+
+let inferenceVideo = document.createElement('video');
+inferenceVideo.width = IMAGE_SIZE;
+inferenceVideo.height = IMAGE_SIZE;
+
+async function video_listener(details) {
+    let mimeType = '';
+    let length = -1;
+    for(let i=0; i<details.responseHeaders.length; i++) {
+        let header = details.responseHeaders[i];
+        let headerName = header.name.toLowerCase();
+        if(headerName == "content-type") {
+            mimeType = header.value;
+        }
+        if (headerName == 'content-length') {
+            length = header.value-0;
+        }
+    }
+    console.log('VIDEO mime type check '+mimeType+': '+length);
+    let isVideo =  mimeType.startsWith('video/');
+    if(!isVideo) {
+        return;
+    }
+    console.log('VIDEO: media mimeType: '+mimeType+' isVideo? '+isVideo);
+
+    console.log('VIDEO headers '+details.requestId);
+    const startTime = performance.now();
+    let filter = browser.webRequest.filterResponseData(details.requestId);
+    let allData = [];
+    
+  
+    filter.ondata = event => {
+        console.log('VIDEO data '+details.requestId);
+        allData.push(event.data);
+    }
+
+    filter.onerror = e => {
+        try
+        {
+            filter.close();
+        }
+        catch(ex)
+        {
+            console.log('VIDEO Filter error: '+e+', '+ex);
+        }
+    }
+  
+    filter.onstop = async event => {
+        incrementCheckCount();
+        let capturedWork = async () => {
+            console.log('VIDEO starting work for '+details.requestId +' from '+details.url);
+            try
+            {
+                let byteCount = 0;
+                for(let i=0; i<allData.length; i++) {
+                    byteCount += allData[i].byteLength;
+                }
+
+                let blob = new Blob(allData, {type: mimeType});
+                let url = URL.createObjectURL(blob);
+
+                inferenceVideo.oncanplaythrough = async function(e) {
+                    let timeRanges = inferenceVideo.seekable;
+                    let times = [];
+
+                    for(let timeRangeIndex=0; timeRangeIndex<timeRanges.length; timeRangeIndex++) {
+                        let timeStart = timeRanges.start(timeRangeIndex);
+                        let timeEnd = timeRanges.end(timeRangeIndex);
+                        let steps = Math.floor( (timeEnd-timeStart) / SCAN_STEP_SECONDS );
+                        for(let step=0; step<steps; step++) {
+                            let currentTime = timeStart + step*SCAN_STEP_SECONDS;
+                            console.log('VIDEO: Setting up scan for '+details.requestId+' for time '+currentTime);
+                            times.push(currentTime);
+                        }
+                    }
+
+                    if(times.length > 0)
+                    {
+                        console.log('VIDEO: '+details.requestId+' has '+times.length+' frames remaining');
+                        inferenceVideo.oncanplaythrough = null;
+                        inferenceVideo.currentTime = times.shift();
+
+                        inferenceVideo.ontimeupdate = async (e) =>
+                        {
+                            console.log('VIDEO: '+details.requestId+' has '+times.length+' frames remaining');
+                            let sqrxrScore = await predict(inferenceVideo);
+                            let isSafeFrame = isSafe(sqrxrScore);
+                            console.log('VIDEO complete frame: ' + details.requestId +' at time '+inferenceVideo.currentTime+' score was '+sqrxrScore+', '+(isSafeFrame ? 'safe' : 'unsafe'));
+                            if(!isSafeFrame) {
+                                incrementCheckCount();
+                                incrementBlockCount();
+                                console.log('VIDEO complete blocked: '+details.requestId+' at time '+inferenceVideo.currentTime);
+                                filter.close();
+                                times = [];
+                            } else {
+                                if(times.length>0) {
+                                    inferenceVideo.currentTime = times.shift();
+                                } else {
+                                    incrementCheckCount();
+                                    incrementPassCount();
+                                    console.log('VIDEO complete passed: '+details.requestId);
+                                    for(let i=0; i<allData.length; i++) {
+                                        filter.write(allData[i]);
+                                    }
+                                    filter.close();
+                                }
+                            }
+                        }
+                    } else {
+                        console.log('VIDEO: no times: passing through '+details.requestId);
+                        for(let i=0; i<allData.length; i++) {
+                            filter.write(allData[i]);
+                        }
+                        filter.close();
+                    }
+                }
+
+                inferenceVideo.type = mimeType;
+                inferenceVideo.src = url;
+
+            } catch(e) {
+                console.log('VIDEO Error for '+details.url+': '+e)
+                for(let i=0; i<allData.length; i++) {
+                    filter.write(allData[i]);
+                }
+                filter.close();
+            }
+        };
+
+        console.log('VIDEO queuing '+details.requestId);
+        capturedWorkQueue[details.requestId] = capturedWork;
+
+        let lowestRequest = 10000000;
+        let remainingWorkCount = 0;
+        for(let key in capturedWorkQueue) {
+            if (capturedWorkQueue.hasOwnProperty(key)) { 
+                remainingWorkCount++;
+                if(key < lowestRequest) {
+                    lowestRequest = key;
+                }
+            }
+        }
+        console.log('VIDEO dequeuing '+lowestRequest);
+        let work = capturedWorkQueue[lowestRequest];
+        await work();
+        delete capturedWorkQueue[lowestRequest];
+        console.log('VIDEO remaining: '+(remainingWorkCount-1));
+    }
+    return details;
+  }
+
+browser.webRequest.onHeadersReceived.addListener(
+    video_listener,
+    {urls:["<all_urls>"], types:["media"]},
     ["blocking","responseHeaders"]
   );
 
