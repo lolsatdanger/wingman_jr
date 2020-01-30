@@ -643,9 +643,6 @@ browser.webRequest.onHeadersReceived.addListener(
 
 ///////////////////////////////Video Stuff////////////////////////////////
 
-let inferenceVideo = document.createElement('video');
-inferenceVideo.width = IMAGE_SIZE;
-inferenceVideo.height = IMAGE_SIZE;
 let problematicVideoCount = 0;
 let allVideoCount = 0;
 
@@ -671,6 +668,9 @@ async function video_listener(details) {
 
     console.log('VIDEO headers '+details.requestId);
     const startTime = performance.now();
+    let inferenceVideo = document.createElement('video');
+    inferenceVideo.width = IMAGE_SIZE;
+    inferenceVideo.height = IMAGE_SIZE;
     let filter = browser.webRequest.filterResponseData(details.requestId);
     let bufferedData = [];
     let mediaSource = new MediaSource();
@@ -722,6 +722,9 @@ async function video_listener(details) {
             console.log('Video sourceopen digest '+details.requestId+' buffer '+bufferedData.length);
             sourceBuffer.appendBuffer(bufferedData.shift());
         }
+        sourceBuffer.addEventListener('error', function(e) {
+            console.log('VIDEO sourcebuffer error '+details.requestId+' '+JSON.stringify(e));
+        });
     });
 
     mediaSource.addEventListener('sourceclose', function(e){
