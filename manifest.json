@@ -9,7 +9,8 @@
       "webRequestBlocking",
       "<all_urls>",
       "menus",
-      "proxy"
+      "proxy",
+      "downloads"
     ],
   
     "background": {

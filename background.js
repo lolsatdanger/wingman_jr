@@ -659,10 +659,16 @@ async function video_listener(details) {
             length = header.value-0;
         }
     }
-    console.log('VIDEO mime type check '+mimeType+': '+length);
+    console.log('VIDEO mime type check for '+details.requestId+' '+mimeType+': '+length);
     let isVideo =  mimeType.startsWith('video/');
     if(!isVideo) {
-        return;
+        let isImage = mimeType.startsWith('image/');
+        if(isImage) {
+            console.log('Video received an image: '+details.requestId+' '+mimeType);
+            return listener(details);
+        } else {
+            return;
+        }
     }
     console.log('VIDEO: media mimeType: '+mimeType+' isVideo? '+isVideo);
 
@@ -677,6 +683,20 @@ async function video_listener(details) {
     let sourceBuffer = null;
     let isAllDataReceived = false;
     let isProblematicVideo = false;
+    let appendedCount = 0;
+    let downloadBuffer = [];
+
+    let genericListener = function(e){
+        let timeRanges = inferenceVideo.seekable;
+        let timeStart = -1;
+        let timeEnd = -1;
+        if(timeRanges.length > 0) {
+            timeStart = timeRanges.start(0);
+            timeEnd = timeRanges.end(0);
+        }
+        console.log('Video event for '+details.requestId+ ' of type '+e.type+' with ranges '+timeStart+'->'+timeEnd+' and duration '+mediaSource.duration);
+    };
+
     mediaSource.addEventListener('sourceopen', function(){
         console.log('Video sourceopen '+details.requestId);
         if(sourceBuffer != null) {
@@ -684,6 +704,7 @@ async function video_listener(details) {
             return;
         }
         sourceBuffer = mediaSource.addSourceBuffer(mimeType);
+        //sourceBuffer = mediaSource.addSourceBuffer('video/mp4;codecs="avc1.4d001e,mp4a.40.2');
         sourceBuffer.addEventListener('updateend', function(){
             if(sourceBuffer.updating) {
                 console.log('VIDEO BIZARRE updating status on updateend for '+details.requestId);
@@ -693,16 +714,23 @@ async function video_listener(details) {
                 console.log('Video digest '+details.requestId+' buffer '+bufferedData.length);
 
                 /////////
-                let timeRanges = inferenceVideo.buffered;
-
+                let timeRanges = inferenceVideo.seekable;
+                console.log('Video times for '+details.requestId+' has length '+timeRanges.length+' and duration '+mediaSource.duration);
                 for(let timeRangeIndex=0; timeRangeIndex<timeRanges.length; timeRangeIndex++) {
                     let timeStart = timeRanges.start(timeRangeIndex);
                     let timeEnd = timeRanges.end(timeRangeIndex);
                     console.log('Video Times now available for '+details.requestId+': '+timeStart+'->'+timeEnd);
+                    //if(timeEnd > mediaSource.duration) {
+                    //    mediaSource.duration = timeEnd;
+                    //}
                 }
                 ////////
                 if(mediaSource.readyState == 'open') {
-                    sourceBuffer.appendBuffer(bufferedData.shift());
+                    let buffer = bufferedData.shift();
+                    appendedCount += buffer.byteLength;
+                    console.log('Video event append status '+appendedCount+'/'+length);
+                    sourceBuffer.appendBuffer(buffer);
+                    downloadBuffer.push(buffer);
                 } else {
                     if(!isProblematicVideo) {
                         problematicVideoCount++;
@@ -712,19 +740,40 @@ async function video_listener(details) {
                 }
             } else {
                 console.log('Video digest currently complete for '+details.requestId);
+                /////////
+                let timeRanges = inferenceVideo.seekable;
+                console.log('Video times for '+details.requestId+' has length '+timeRanges.length+' and duration '+mediaSource.duration);
+                for(let timeRangeIndex=0; timeRangeIndex<timeRanges.length; timeRangeIndex++) {
+                    let timeStart = timeRanges.start(timeRangeIndex);
+                    let timeEnd = timeRanges.end(timeRangeIndex);
+                    console.log('Video Times now available for '+details.requestId+': '+timeStart+'->'+timeEnd);
+                    //if(timeEnd > mediaSource.duration) {
+                    //    mediaSource.duration = timeEnd;
+                    //}
+                }
+                ////////
                 if(isAllDataReceived) {
                     console.log('VIDEO digest ending stream for '+details.requestId);
-                    mediaSource.endOfStream();
+                    mediaSource.endOfStream(); //Causes duration to go to 0..?!@?
+                    let blob = new Blob(downloadBuffer, {type: mimeType});
+                    let downloadUrl = URL.createObjectURL(blob);
+                    browser.downloads.download({ url: downloadUrl, filename: 'test.mp4'});
                 }
             }
         });
         if(bufferedData.length > 0) {
             console.log('Video sourceopen digest '+details.requestId+' buffer '+bufferedData.length);
-            sourceBuffer.appendBuffer(bufferedData.shift());
+            let buffer = bufferedData.shift();
+            sourceBuffer.appendBuffer(buffer);
+            downloadBuffer.push(buffer);
         }
         sourceBuffer.addEventListener('error', function(e) {
             console.log('VIDEO sourcebuffer error '+details.requestId+' '+JSON.stringify(e));
         });
+        sourceBuffer.addEventListener('error', genericListener);
+        sourceBuffer.addEventListener('update', genericListener);
+        sourceBuffer.addEventListener('updateend', genericListener);
+        //inferenceVideo.play();
     });
 
     mediaSource.addEventListener('sourceclose', function(e){
@@ -735,7 +784,67 @@ async function video_listener(details) {
     mediaSource.addEventListener('sourceended', function(e){
         console.log('VIDEO sourceended '+details.requestId+' '+JSON.stringify(e));
     });
+
+    let tryAdvance = function(e){
+        //let time = inferenceVideo.currentTime;
+        console.log('Video tryadvance '+e.type+' '+details.requestId);
+        let newTime = 0 + SCAN_STEP_SECONDS;
+        let timeRanges = inferenceVideo.seekable;
+        console.log('Video tryadvance '+e.type+' timeranges '+timeRanges.length+' for '+details.requestId+ ' with duration '+mediaSource.duration+'/'+inferenceVideo.duration);
+        let isSeekable = true;
+        for(let timeRangeIndex=0; timeRangeIndex<timeRanges.length; timeRangeIndex++) {
+            let timeStart = timeRanges.start(timeRangeIndex);
+            let timeEnd = timeRanges.end(timeRangeIndex);
+            console.log('Video tryadvance Times now available for '+details.requestId+': '+timeStart+'->'+timeEnd+' vs. duration='+mediaSource.duration);
+            if(timeEnd > mediaSource.duration) { //Does mediaSource.duration not auto update based on seekable..??
+                mediaSource.duration = timeEnd;
+                console.log('Video tryadvance Time set duration on media source to '+timeEnd+', value reported is '+mediaSource.duration);
+            }
+            if(newTime >= timeStart && newTime <= timeEnd) {
+                console.log('Video tryadvance seekable! '+details.requestId+' to '+newTime);
+                isSeekable = true;
+            }
+        }
+        if(isSeekable) { //mediaSource.duration > 0, but inferenceVideo.duration == 0 - why????
+            console.log('Video tryadvance time seek engaged for '+details.requestId+' '+newTime+'/'+mediaSource.duration+' vs '+inferenceVideo.duration);
+            inferenceVideo.play();
+            inferenceVideo.currentTime = newTime;
+        }
+    };
+    inferenceVideo.addEventListener('loadedmetadata', tryAdvance);
+    //inferenceVideo.addEventListener('seeking', tryAdvance);
+    inferenceVideo.addEventListener('seeked', tryAdvance);
+    inferenceVideo.addEventListener('error', function(e) {
+        console.log('Video error - HTMLMediaElement reported error '+JSON.stringify(e)+' '+inferenceVideo.error);
+    });
+
+    inferenceVideo.addEventListener('seeking', genericListener);
+    inferenceVideo.addEventListener('seeked', genericListener);
+    inferenceVideo.addEventListener('canplay', genericListener);
+    inferenceVideo.addEventListener('canplaythrough', genericListener);
+    inferenceVideo.addEventListener('durationchange', genericListener);
+    inferenceVideo.addEventListener('emptied', genericListener);
+    inferenceVideo.addEventListener('ended', genericListener);
+    inferenceVideo.addEventListener('loadeddata', genericListener);
+    inferenceVideo.addEventListener('loadedmetadata', genericListener);
+    inferenceVideo.addEventListener('pause', genericListener);
+    inferenceVideo.addEventListener('play', genericListener);
+    inferenceVideo.addEventListener('playing', genericListener);
+    inferenceVideo.addEventListener('progress', genericListener);
+    inferenceVideo.addEventListener('ratechange', genericListener);
+    inferenceVideo.addEventListener('stalled', genericListener);
+    inferenceVideo.addEventListener('suspend', genericListener);
+    inferenceVideo.addEventListener('timeupdate', genericListener);
+    inferenceVideo.addEventListener('stalled', genericListener);
+    inferenceVideo.addEventListener('waiting', genericListener);
+
+
+
+
+
+
     let url = URL.createObjectURL(mediaSource);
+    inferenceVideo.preload = 'auto';
     inferenceVideo.type = mimeType;
     inferenceVideo.src = url;
     
@@ -743,13 +852,17 @@ async function video_listener(details) {
   
     filter.ondata = event => {
         receivedCount += event.data.byteLength;
-        console.log('VIDEO data stream start '+details.requestId+' with length '+event.data.byteLength+'/'+receivedCount+'/'+length+' with media source readystate='+mediaSource.readyState);
+        //console.log('VIDEO data stream start '+details.requestId+' with length '+event.data.byteLength+'/'+receivedCount+'/'+length+' with media source readystate='+mediaSource.readyState);
         if(sourceBuffer == null || sourceBuffer.updating || bufferedData.length > 0) {
-            console.log('VIDEO data buffer '+details.requestId);
+           // console.log('VIDEO data buffer '+details.requestId);
             bufferedData.push(event.data);
         } else if (mediaSource.readyState == 'open') { /* ready and waiting */
-            console.log('VIDEO data streaming appendBuffer '+details.requestId);
-            sourceBuffer.appendBuffer(event.data);
+            //console.log('VIDEO data streaming appendBuffer '+details.requestId);
+            let buffer = event.data;
+            appendedCount += buffer.byteLength;
+            console.log('Video event append status '+appendedCount+'/'+length);
+            sourceBuffer.appendBuffer(buffer);
+            downloadBuffer.push(buffer);
         } else {
             if(!isProblematicVideo) {
                 problematicVideoCount++;
@@ -758,7 +871,7 @@ async function video_listener(details) {
             console.log('VIDEO error data stream '+details.requestId+' - unable to append!');
         }
         filter.write(event.data);
-        console.log('VIDEO data stream end '+details.requestId+' with length '+event.data.byteLength);
+        //console.log('VIDEO data stream end '+details.requestId+' with length '+event.data.byteLength);
     }
 
     filter.onerror = e => {
@@ -777,66 +890,6 @@ async function video_listener(details) {
         console.log('Video '+details.requestId+' data is fully received');
         isAllDataReceived = true;
         filter.close();
-        //incrementCheckCount();
-        /*
-
-                inferenceVideo.oncanplaythrough = async function(e) {
-                    let timeRanges = inferenceVideo.seekable;
-                    let times = [];
-
-                    for(let timeRangeIndex=0; timeRangeIndex<timeRanges.length; timeRangeIndex++) {
-                        let timeStart = timeRanges.start(timeRangeIndex);
-                        let timeEnd = timeRanges.end(timeRangeIndex);
-                        let steps = Math.floor( (timeEnd-timeStart) / SCAN_STEP_SECONDS );
-                        for(let step=0; step<steps; step++) {
-                            let currentTime = timeStart + step*SCAN_STEP_SECONDS;
-                            console.log('VIDEO: Setting up scan for '+details.requestId+' for time '+currentTime);
-                            times.push(currentTime);
-                        }
-                    }
-
-                    if(times.length > 0)
-                    {
-                        console.log('VIDEO: '+details.requestId+' has '+times.length+' frames remaining');
-                        inferenceVideo.oncanplaythrough = null;
-                        inferenceVideo.currentTime = times.shift();
-
-                        inferenceVideo.ontimeupdate = async (e) =>
-                        {
-                            console.log('VIDEO: '+details.requestId+' has '+times.length+' frames remaining');
-                            let sqrxrScore = await predict(inferenceVideo);
-                            let isSafeFrame = isSafe(sqrxrScore);
-                            console.log('VIDEO complete frame: ' + details.requestId +' at time '+inferenceVideo.currentTime+' score was '+sqrxrScore+', '+(isSafeFrame ? 'safe' : 'unsafe'));
-                            if(!isSafeFrame) {
-                                incrementBlockCount();
-                                console.log('VIDEO complete blocked: '+details.requestId+' at time '+inferenceVideo.currentTime);
-                                filter.close();
-                                times = [];
-                            } else {
-                                if(times.length>0) {
-                                    inferenceVideo.currentTime = times.shift();
-                                } else {
-                                    incrementPassCount();
-                                    console.log('VIDEO complete passed: '+details.requestId);
-                                    for(let i=0; i<allData.length; i++) {
-                                        filter.write(allData[i]);
-                                    }
-                                    filter.close();
-                                }
-                            }
-                        }
-                    } else {
-                        console.log('VIDEO: no times: passing through '+details.requestId);
-                        for(let i=0; i<allData.length; i++) {
-                            filter.write(allData[i]);
-                        }
-                        filter.close();
-                    }
-                }
-
-                inferenceVideo.type = mimeType;
-                inferenceVideo.src = url;
-                */
         };
     return details;
   }
