@@ -16,7 +16,6 @@ const MODEL_PATH = 'sqrxr_62_graphopt/model.json'
 const IMAGE_SIZE = 224;
 const MIN_IMAGE_SIZE = 36;
 const MIN_IMAGE_BYTES = 1024;
-const SCAN_STEP_SECONDS = 1.99;
 
 let isInReviewMode = false;
 let wingman;
@@ -643,8 +642,9 @@ browser.webRequest.onHeadersReceived.addListener(
 
 ///////////////////////////////Video Stuff////////////////////////////////
 
-let problematicVideoCount = 0;
-let allVideoCount = 0;
+const SCAN_STEP_SECONDS = 2.0;
+const SCAN_TRIGGER_BYTES = 100*1000;
+let unsafePictures = [];
 
 async function video_listener(details) {
     let mimeType = '';
@@ -675,149 +675,39 @@ async function video_listener(details) {
     console.log('VIDEO headers '+details.requestId);
     const startTime = performance.now();
     let inferenceVideo = document.createElement('video');
-    inferenceVideo.width = IMAGE_SIZE;
-    inferenceVideo.height = IMAGE_SIZE;
+    //inferenceVideo.width = IMAGE_SIZE;
+    //inferenceVideo.height = IMAGE_SIZE;
+    inferenceVideo.type = mimeType;
+    inferenceVideo.autoplay = false;  
+
     let filter = browser.webRequest.filterResponseData(details.requestId);
-    let bufferedData = [];
-    let mediaSource = new MediaSource();
-    let sourceBuffer = null;
+    let allData = [];
+    let pushData = [];
+    let scanData = [];
+    
+    let receivedBytes = 0;
+    let processedBytes = 0;
+    let processedSeconds = -1;
+    let isProcessing = false;
     let isAllDataReceived = false;
-    let isProblematicVideo = false;
-    let appendedCount = 0;
-    let downloadBuffer = [];
+    let isUnsafeVideo = false;
 
     let genericListener = function(e){
-        let timeRanges = inferenceVideo.seekable;
+        if (isUnsafeVideo) {
+            return;
+        }
+        let timeRanges = inferenceVideo.buffered;
         let timeStart = -1;
         let timeEnd = -1;
         if(timeRanges.length > 0) {
             timeStart = timeRanges.start(0);
             timeEnd = timeRanges.end(0);
         }
-        console.log('Video event for '+details.requestId+ ' of type '+e.type+' with ranges '+timeStart+'->'+timeEnd+' and duration '+mediaSource.duration);
+        console.log('Video event for '+details.requestId+ ' of type '+e.type+' with ranges '+timeStart+'->'+timeEnd+' and duration '+inferenceVideo.duration);
     };
 
-    mediaSource.addEventListener('sourceopen', function(){
-        console.log('Video sourceopen '+details.requestId);
-        if(sourceBuffer != null) {
-            console.log('Video sourceopen '+details.requestId+' was received second time, ignoring...');
-            return;
-        }
-        sourceBuffer = mediaSource.addSourceBuffer(mimeType);
-        //sourceBuffer = mediaSource.addSourceBuffer('video/mp4;codecs="avc1.4d001e,mp4a.40.2');
-        sourceBuffer.addEventListener('updateend', function(){
-            if(sourceBuffer.updating) {
-                console.log('VIDEO BIZARRE updating status on updateend for '+details.requestId);
-                return;
-            }
-            if(bufferedData.length > 0) {
-                console.log('Video digest '+details.requestId+' buffer '+bufferedData.length);
-
-                /////////
-                let timeRanges = inferenceVideo.seekable;
-                console.log('Video times for '+details.requestId+' has length '+timeRanges.length+' and duration '+mediaSource.duration);
-                for(let timeRangeIndex=0; timeRangeIndex<timeRanges.length; timeRangeIndex++) {
-                    let timeStart = timeRanges.start(timeRangeIndex);
-                    let timeEnd = timeRanges.end(timeRangeIndex);
-                    console.log('Video Times now available for '+details.requestId+': '+timeStart+'->'+timeEnd);
-                    //if(timeEnd > mediaSource.duration) {
-                    //    mediaSource.duration = timeEnd;
-                    //}
-                }
-                ////////
-                if(mediaSource.readyState == 'open') {
-                    let buffer = bufferedData.shift();
-                    appendedCount += buffer.byteLength;
-                    console.log('Video event append status '+appendedCount+'/'+length);
-                    sourceBuffer.appendBuffer(buffer);
-                    downloadBuffer.push(buffer);
-                } else {
-                    if(!isProblematicVideo) {
-                        problematicVideoCount++;
-                    }
-                    isProblematicVideo = true;
-                    console.log('VIDEO error digest appendBuffer '+details.requestId+' - unable to append!');
-                }
-            } else {
-                console.log('Video digest currently complete for '+details.requestId);
-                /////////
-                let timeRanges = inferenceVideo.seekable;
-                console.log('Video times for '+details.requestId+' has length '+timeRanges.length+' and duration '+mediaSource.duration);
-                for(let timeRangeIndex=0; timeRangeIndex<timeRanges.length; timeRangeIndex++) {
-                    let timeStart = timeRanges.start(timeRangeIndex);
-                    let timeEnd = timeRanges.end(timeRangeIndex);
-                    console.log('Video Times now available for '+details.requestId+': '+timeStart+'->'+timeEnd);
-                    //if(timeEnd > mediaSource.duration) {
-                    //    mediaSource.duration = timeEnd;
-                    //}
-                }
-                ////////
-                if(isAllDataReceived) {
-                    console.log('VIDEO digest ending stream for '+details.requestId);
-                    mediaSource.endOfStream(); //Causes duration to go to 0..?!@?
-                    let blob = new Blob(downloadBuffer, {type: mimeType});
-                    let downloadUrl = URL.createObjectURL(blob);
-                    browser.downloads.download({ url: downloadUrl, filename: 'test.mp4'});
-                }
-            }
-        });
-        if(bufferedData.length > 0) {
-            console.log('Video sourceopen digest '+details.requestId+' buffer '+bufferedData.length);
-            let buffer = bufferedData.shift();
-            sourceBuffer.appendBuffer(buffer);
-            downloadBuffer.push(buffer);
-        }
-        sourceBuffer.addEventListener('error', function(e) {
-            console.log('VIDEO sourcebuffer error '+details.requestId+' '+JSON.stringify(e));
-        });
-        sourceBuffer.addEventListener('error', genericListener);
-        sourceBuffer.addEventListener('update', genericListener);
-        sourceBuffer.addEventListener('updateend', genericListener);
-        //inferenceVideo.play();
-    });
-
-    mediaSource.addEventListener('sourceclose', function(e){
-        allVideoCount++;
-        console.log('VIDEO sourceclose '+details.requestId+' '+JSON.stringify(e));
-        console.log('VIDEO sourceclose '+details.requestId+' - problematic video count '+problematicVideoCount+'/'+allVideoCount);
-    });
-    mediaSource.addEventListener('sourceended', function(e){
-        console.log('VIDEO sourceended '+details.requestId+' '+JSON.stringify(e));
-    });
-
-    let tryAdvance = function(e){
-        //let time = inferenceVideo.currentTime;
-        console.log('Video tryadvance '+e.type+' '+details.requestId);
-        let newTime = 0 + SCAN_STEP_SECONDS;
-        let timeRanges = inferenceVideo.seekable;
-        console.log('Video tryadvance '+e.type+' timeranges '+timeRanges.length+' for '+details.requestId+ ' with duration '+mediaSource.duration+'/'+inferenceVideo.duration);
-        let isSeekable = true;
-        for(let timeRangeIndex=0; timeRangeIndex<timeRanges.length; timeRangeIndex++) {
-            let timeStart = timeRanges.start(timeRangeIndex);
-            let timeEnd = timeRanges.end(timeRangeIndex);
-            console.log('Video tryadvance Times now available for '+details.requestId+': '+timeStart+'->'+timeEnd+' vs. duration='+mediaSource.duration);
-            if(timeEnd > mediaSource.duration) { //Does mediaSource.duration not auto update based on seekable..??
-                mediaSource.duration = timeEnd;
-                console.log('Video tryadvance Time set duration on media source to '+timeEnd+', value reported is '+mediaSource.duration);
-            }
-            if(newTime >= timeStart && newTime <= timeEnd) {
-                console.log('Video tryadvance seekable! '+details.requestId+' to '+newTime);
-                isSeekable = true;
-            }
-        }
-        if(isSeekable) { //mediaSource.duration > 0, but inferenceVideo.duration == 0 - why????
-            console.log('Video tryadvance time seek engaged for '+details.requestId+' '+newTime+'/'+mediaSource.duration+' vs '+inferenceVideo.duration);
-            inferenceVideo.play();
-            inferenceVideo.currentTime = newTime;
-        }
-    };
-    inferenceVideo.addEventListener('loadedmetadata', tryAdvance);
-    //inferenceVideo.addEventListener('seeking', tryAdvance);
-    inferenceVideo.addEventListener('seeked', tryAdvance);
-    inferenceVideo.addEventListener('error', function(e) {
-        console.log('Video error - HTMLMediaElement reported error '+JSON.stringify(e)+' '+inferenceVideo.error);
-    });
-
+    inferenceVideo.addEventListener('error', genericListener);    
+    inferenceVideo.addEventListener('loadedmetadata', genericListener);
     inferenceVideo.addEventListener('seeking', genericListener);
     inferenceVideo.addEventListener('seeked', genericListener);
     inferenceVideo.addEventListener('canplay', genericListener);
@@ -838,43 +728,136 @@ async function video_listener(details) {
     inferenceVideo.addEventListener('stalled', genericListener);
     inferenceVideo.addEventListener('waiting', genericListener);
 
+    inferenceVideo.addEventListener('error', function(e) {
+        console.log('Video event DECODE FAILURE? '+details.requestId+ ' reported: '+e);
+        URL.revokeObjectURL(inferenceVideo.src);
+        isProcessing = false;
+    });
 
-
-
-
-
-    let url = URL.createObjectURL(mediaSource);
-    inferenceVideo.preload = 'auto';
-    inferenceVideo.type = mimeType;
-    inferenceVideo.src = url;
+    let startScan = function() {
+        console.log('Video event SCAN TRIGGER '+receivedBytes+' vs. old '+processedBytes);
+        isProcessing = true;
+        scanData = pushData;
+        pushData = [];
+        let blob = new Blob(allData, {type: mimeType});
+        let url = URL.createObjectURL(blob);
+        inferenceVideo.src = url;
+    }
     
-    let receivedCount = 0;
+    let onSeeked = async function() {
+        let sqrxrScore = await predict(inferenceVideo);
+        console.log('Video event score '+details.requestId+' at time '+inferenceVideo.currentTime+' was '+sqrxrScore);
+        let isFrameSafe = isSafe(sqrxrScore);
+        if(!isFrameSafe) {
+            //stop the presses!
+            console.log('Video event score UNSAFE '+details.requestId+' with score '+sqrxrScore);
+            isUnsafeVideo = true;
+
+            try {
+            let badImageCanvas = document.createElement('canvas');
+            badImageCanvas.width = IMAGE_SIZE;
+            badImageCanvas.height = IMAGE_SIZE;
+            let badImageCtx = badImageCanvas.getContext('2d');
+            badImageCtx.imageSmoothingEnabled = true;
+            badImageCtx.drawImage(inferenceVideo, 0, 0, inferenceVideo.width, inferenceVideo.height, 0, 0, IMAGE_SIZE,IMAGE_SIZE);
+            badImageCanvas.toBlob(function(blob){
+                let badImageUrl = URL.createObjectURL(blob);
+                console.log('Video event score UNSAFE '+details.requestId+' saving to bad.png');
+                browser.downloads.download({url:badImageUrl, filename:'bad.png'});
+            });
+            
+            } catch (e) {
+                console.log('Video event score UNSAFE '+details.requestId+' failed to save image...: '+e);
+            }
+
+
+            try {
+            filter.close();
+            } catch {}
+            try {
+            URL.revokeObjectURL(inferenceVideo.src);
+            } catch {}
+            scanData = null;
+            pushData = null;
+            allData = null;
+            inferenceVideo = null;
+            inferenceCanvas = null;
+        }
+        if(inferenceVideo.currentTime > processedSeconds) {
+            processedSeconds = inferenceVideo.currentTime;
+        }
+        tryAdvance();
+    };
+    inferenceVideo.addEventListener('seeked', onSeeked);
+
+    let tryAdvance = function() {
+        if (isUnsafeVideo) {
+            return;
+        }
+        let timeRanges = inferenceVideo.buffered;
+        let timeStart = -1;
+        let timeEnd = -1;
+        if(timeRanges.length > 0) {
+            timeStart = timeRanges.start(0);
+            timeEnd = timeRanges.end(0);
+        }
+        let newTime = processedSeconds + SCAN_STEP_SECONDS;
+        if(processedSeconds < timeStart) {
+            console.log('Video seek setup beginning '+timeStart);
+            inferenceVideo.currentTime = timeStart;
+        } else if(newTime < timeEnd) {
+            console.log('Video seek setup normal '+newTime);
+            inferenceVideo.currentTime = newTime;
+        } else {
+            let bytesPushed = 0;
+            while(scanData.length > 0) {
+                let buffer = scanData.shift();
+                bytesPushed += buffer.byteLength;
+                processedBytes += buffer.byteLength;
+                filter.write(buffer);
+            }
+            console.log('Video event '+details.requestId+': processing complete up to '+processedSeconds+', passing on '+bytesPushed+' bytes');
+            isProcessing = false;
+            URL.revokeObjectURL(inferenceVideo.src);
+
+            if(isAllDataReceived) {
+                if(processedBytes < receivedBytes) {
+                    console.log('Video event final push '+details.requestId);
+                    startScan();
+                } else {
+                    console.log('Video event COMPLETED '+details.requestId);
+                    filter.close();
+                }
+            }
+        }
+    };
+
+
+    
+    inferenceVideo.addEventListener('loadeddata', function(_){
+        inferenceVideo.width = inferenceVideo.videoWidth;
+        inferenceVideo.height = inferenceVideo.videoHeight;
+        console.log('Video event size is '+inferenceVideo.width+'x'+inferenceVideo.height);
+        tryAdvance();
+    });
   
     filter.ondata = event => {
-        receivedCount += event.data.byteLength;
-        //console.log('VIDEO data stream start '+details.requestId+' with length '+event.data.byteLength+'/'+receivedCount+'/'+length+' with media source readystate='+mediaSource.readyState);
-        if(sourceBuffer == null || sourceBuffer.updating || bufferedData.length > 0) {
-           // console.log('VIDEO data buffer '+details.requestId);
-            bufferedData.push(event.data);
-        } else if (mediaSource.readyState == 'open') { /* ready and waiting */
-            //console.log('VIDEO data streaming appendBuffer '+details.requestId);
-            let buffer = event.data;
-            appendedCount += buffer.byteLength;
-            console.log('Video event append status '+appendedCount+'/'+length);
-            sourceBuffer.appendBuffer(buffer);
-            downloadBuffer.push(buffer);
-        } else {
-            if(!isProblematicVideo) {
-                problematicVideoCount++;
-            }
-            isProblematicVideo = true;
-            console.log('VIDEO error data stream '+details.requestId+' - unable to append!');
+        if (isUnsafeVideo) {
+            return;
         }
-        filter.write(event.data);
-        //console.log('VIDEO data stream end '+details.requestId+' with length '+event.data.byteLength);
+        receivedBytes += event.data.byteLength;
+        allData.push(event.data);
+        pushData.push(event.data);
+
+        if(!isProcessing && receivedBytes > processedBytes + SCAN_TRIGGER_BYTES) {
+            startScan();
+        }
     }
 
     filter.onerror = e => {
+        if (isUnsafeVideo) {
+            return;
+        }
         try
         {
             console.log('Video error for '+details.requestId+': '+e);
@@ -887,9 +870,11 @@ async function video_listener(details) {
     }
   
     filter.onstop = async event => {
-        console.log('Video '+details.requestId+' data is fully received');
+        if (isUnsafeVideo) {
+            return;
+        }
+        console.log('Video '+details.requestId+' data has stopped');
         isAllDataReceived = true;
-        filter.close();
         };
     return details;
   }
